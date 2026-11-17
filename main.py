@@ -34,6 +34,18 @@ BANDWIDTH = 1.1
 # Hour-pool smoothing weights for (h-1, h, h+1).
 HOUR_KERNEL = (0.25, 0.5, 0.25)
 
+# Late-day bias of the raw kernel fan for launches that were already live
+# before the UTC day started (regional rolling-midnight unlocks: viewers
+# an hour before day start at or above the first hour's mean). Measured as
+# the leave-one-out mean residual (actual minus forecast median, log
+# scale) of the comparable library's big rolling launches, per hour: the
+# fan runs low late in the day, when the Americas' evening wave lands.
+ROLLING_CORRECTION = {
+    11: 0.05, 12: 0.04, 13: 0.04, 14: 0.07, 15: 0.07, 16: 0.07,
+    17: 0.12, 18: 0.16, 19: 0.21, 20: 0.21, 21: 0.17, 22: 0.13,
+    23: 0.15, 24: 0.14,
+}
+
 
 def round2(x: float) -> float | int:
     """x rounded to 2 decimals, half up, as JavaScript's Math.round does.
@@ -112,6 +124,16 @@ def forecast_case(case: dict, name: str) -> dict:
             if v and v > 0:
                 samples[h].append((math.log(v) - log_v1, weight))
 
+    # Rolling-unlock signal: viewers in the last hour before the UTC day
+    # started, relative to the first hour. At or above 1, the game was
+    # already live in early regions and the day's big wave is still coming.
+    pre_day = [r for r in case.get("history_hourly") or []
+               if r["from"][:10] < case["day_start"][:10]]
+    rolling = 0.0
+    if pre_day:
+        pre1 = max(1.0, float(pre_day[-1]["viewers"]))
+        rolling = min(1.0, max(0.0, math.log(pre1 / p1) / 0.2))
+
     rows = []
     for row in case["forecast"]:
         h = row["hour"]
@@ -119,9 +141,11 @@ def forecast_case(case: dict, name: str) -> dict:
         for offset, kweight in zip((-1, 0, 1), HOUR_KERNEL):
             for value, weight in samples.get(h + offset, []):
                 pool.append((value, weight * kweight))
+        shift = rolling * ROLLING_CORRECTION.get(h, 0.0)
         if pool:
             quantiles = [
-                round2(p1 * math.exp(weighted_quantile(pool, tau))) for tau in LEVELS
+                round2(p1 * math.exp(weighted_quantile(pool, tau) + shift))
+                for tau in LEVELS
             ]
         else:
             # No comparable covers this hour: flat persistence with the
